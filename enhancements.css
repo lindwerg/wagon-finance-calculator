@@ -1,0 +1,15 @@
+.recommendation-panel{border-color:#adc1a5;background:#f5f8ee}
+.recommendation-panel h2{font-size:18px}
+.recommend-label{font-size:10px;font-weight:bold;color:#286547;background:#e3ecda;padding:8px 10px;border-radius:6px;margin:18px 0 13px;line-height:1.6}
+.recommend-label.caution{color:#86511e;background:#f0e8d6}
+.recommendation-panel h3{font-size:16px}
+.recommend-numbers{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:17px 0}
+.recommend-numbers>strong{font-size:25px;letter-spacing:-.7px;font-variant-numeric:tabular-nums}
+.recommend-numbers>span{font-size:15px;font-weight:bold;white-space:nowrap;text-align:right}
+.recommend-numbers small{display:block;font-size:10px;font-weight:normal;color:var(--muted);margin-top:5px;letter-spacing:0}
+.recommend-text{font-size:12px;line-height:1.75;color:#4f6757;margin:10px 0}
+.recommendation-panel .micro-note{font-size:10px}
+#manual-copy{width:100%;min-height:190px;font-size:12px;line-height:1.7;padding:14px;border:1px solid var(--line);border-radius:10px;color:var(--ink);background:white}
+.field.full{grid-column:1/-1}
+@media(max-width:500px){.recommend-numbers>strong{font-size:22px}.recommend-text{font-size:11px}}
+@media print{.recommendation-panel{grid-column:1/-1;background:white;border-color:#999}.recommend-numbers{margin:10px 0}}
