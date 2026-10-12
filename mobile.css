@@ -134,6 +134,47 @@
 .meeting-mode .mobile-result #mobile-label { font-size: 9px; }
 .meeting-mode .mobile-result b { font-size: 18px; }
 .meeting-mode #meeting-error { margin-bottom: 0; }
+.mode-selector { border: 0; padding: 0; margin: 0 0 20px; min-width: 0; }
+.mode-selector legend { font-size: 12px; font-weight: bold; margin-bottom: 9px; }
+.mode-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.mode-options label { position: relative; cursor: pointer; }
+.mode-options input { position: absolute; width: 1px; height: 1px; min-height: 0 !important; opacity: 0; }
+.mode-options span { display: grid; place-items: center; min-height: 47px; border: 1px solid #cdd9c7; border-radius: 9px; font-size: 12px; font-weight: bold; background: #f9faf6; color: #4f6757; }
+.mode-options input:checked + span { background: #183c38; border-color: #183c38; color: white; }
+.mode-options input:focus-visible + span { outline: 3px solid #a66536; outline-offset: 3px; }
+#mode-explanation, .flow-controls-note { color: #5e706b; font-size: 11px; line-height: 1.75; margin: 9px 0 0; }
+.flow-controls { border-top: 1px solid #d9e1d2; border-bottom: 1px solid #d9e1d2; padding: 17px 0; margin: 18px 0; display: grid; gap: 14px; }
+.flow-controls[hidden], #flow-report[hidden], #calculation-details[hidden], #more-analysis[hidden] { display: none !important; }
+.flow-controls-note a { font-weight: bold; }
+.flow-cost-strip { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin: 14px 0; border-top: 1px solid #ffffff25; padding: 15px 0; }
+.flow-cost-strip span { font-size: 10px; line-height: 1.6; display: block; color: #c3d1bf; }
+.flow-cost-strip b { display: block; font-size: 17px; margin-top: 7px; overflow-wrap: anywhere; }
+.flow-cash-warning { padding: 14px; margin-bottom: 18px; border: 1px solid #bed4aa55; background: #ffffff0b; border-radius: 9px; }
+.flow-cash-warning.has-gap { border-color: #efbf9766; color: #ffe1c5; }
+.flow-cash-warning b { font-size: 13px; line-height: 1.7; }
+.credit-summary .flow-cash-warning p { font-size: 11px; }
+.flow-report { margin-top: 24px; }
+.flow-report h2 { font-size: 22px; }
+.flow-report p { font-size: 12px; line-height: 1.8; color: #5e706b; }
+.flow-report-metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin: 20px 0; }
+.flow-report-metrics > div { padding: 13px; background: #f2f5ee; border-radius: 9px; min-width: 0; }
+.flow-report-metrics span { display: block; color: #5e706b; font-size: 11px; line-height: 1.7; }
+.flow-report-metrics strong { display: block; font-size: 21px; margin-top: 7px; overflow-wrap: anywhere; }
+.flow-report .settings-details { margin: 17px 0; }
+.flow-report .settings-details summary { min-height: 44px; }
+.flow-report .table-scroll table { min-width: 650px; }
+.flow-report .settings-details:first-of-type table { min-width: 0; width: 100%; }
+.flow-report li { font-size: 12px; line-height: 1.8; margin-bottom: 10px; }
+.flow-month { padding: 12px 0; border-top: 1px solid #dce2d9; }
+.flow-month summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; font-size: 13px; align-items: center; }
+.flow-month summary small { display: block; font-size: 10px; color: #5e706b; margin-top: 4px; }
+.flow-month summary b { font-size: 15px; text-align: right; }
+.flow-month dl { margin: 13px 0 0; }
+.flow-month dl > div { display: flex; justify-content: space-between; gap: 15px; padding: 7px 0; font-size: 11px; line-height: 1.6; }
+.flow-month dt { max-width: 65%; color: #5e706b; }
+.flow-month dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.flow-month dl > div:last-child { border-top: 1px solid #dce2d9; font-weight: bold; }
+.flow-mode .full-report { display: none; }
 @media (max-width: 600px) {
   .meeting-mode .wrap { padding-left: 13px; padding-right: 13px; }
   .meeting-mode .hero { padding: 20px 0 12px; }
@@ -186,6 +227,13 @@
   .meeting-best { font-size: 11px; padding: 13px 15px; }
   .launch-explainer p { font-size: 11px; }
   .meeting-mode .panel.meeting-details { padding: 16px 18px; }
+  .mode-options span { font-size: 11px; }
+  .flow-cost-strip { gap: 9px; }
+  .flow-cost-strip span { font-size: 9px; }
+  .flow-cost-strip b { font-size: 14px; }
+  .flow-report { padding: 18px; }
+  .flow-report-metrics strong { font-size: 18px; }
+  .flow-report h2 { font-size: 20px; }
 }
 @media (max-width: 350px) {
   .quick-anchor { flex-direction: column; align-items: stretch; gap: 4px !important; }
@@ -203,4 +251,11 @@
   .meeting-mode .full-report > summary { display: none; }
   .meeting-mode .full-report:not([open]) > * { display: block; }
   .meeting-mode .result-column { display: grid; margin-top: 0; }
+  .flow-mode #flow-report { display: block !important; border: 0; padding: 0; }
+  .flow-mode #flow-report details > * { display: block; }
+  .flow-mode #flow-report details summary { display: block; font-weight: bold; margin-top: 10px; }
+  .flow-mode #flow-report .flow-month summary { display: flex; }
+  .flow-mode #print-flow { display: none; }
+  .flow-mode #flow-report .table-scroll { overflow: visible; }
+  .flow-mode #flow-report table { min-width: 0; width: 100%; font-size: 9px; }
 }

@@ -5,17 +5,21 @@ import { mountMeetingLayout } from './mobile-layout.mjs';
 import { buildOffers } from './offers.mjs';
 import { TOCHKA_PROFILE, LINE_PROFILE, tochkaAlternative, BILLING_PAIRS, BILLING_ENUMS } from './bank-profile.mjs';
 import { billingControls } from './bank-controls.mjs';
+import { FLOW_DEFAULTS, calculatePortfolio } from './portfolio.mjs';
+import { buildFlowOffers } from './flow-offers.mjs';
+import { mountFlowControls, syncFlowMode, renderFlowMeeting, flowTextSummary } from './flow-ui.mjs';
 
 const $ = id => document.getElementById(id);
 const form = $('calculator');
 const STORAGE = 'wagon-economics-v1';
-const numbers = new Set([...numericInputKeys, ...Object.keys(ALT_DEFAULTS).filter(key => typeof ALT_DEFAULTS[key] === 'number'), 'targetProfit']);
+const numbers = new Set([...numericInputKeys, ...Object.keys(ALT_DEFAULTS).filter(key => typeof ALT_DEFAULTS[key] === 'number'), ...Object.keys(FLOW_DEFAULTS).filter(key => typeof FLOW_DEFAULTS[key] === 'number'), 'targetProfit']);
 const enums = {
   ...BILLING_ENUMS,
   ...Object.fromEntries(BILLING_PAIRS.filter(([primary]) => BILLING_ENUMS[primary]).map(([primary, alternative]) => [alternative, BILLING_ENUMS[primary]])),
   fundingKind: ['none', 'credit', 'line'], delayAnchor: ['payment', 'acceptance'],
   factorRateBase: ['invoice', 'advance'], clientRisk: ['reliable', 'late', 'new'],
   primaryFundingKind: ['credit', 'line'],
+  calculationMode: ['single', 'flow'], flowDispatch: ['uniform', 'monthly_batch'],
 };
 const currency = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', minimumFractionDigits: 0, maximumFractionDigits: 2 });
 const whole = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
@@ -24,7 +28,7 @@ const inputDecimal = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 20 
 const money = n => n === null ? 'Не рассчитано' : currency.format(Math.abs(n) < 0.005 ? 0 : n);
 const signed = n => `${n > 0.005 ? '+' : ''}${money(n)}`;
 const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const initialState = () => ({ ...DEFAULTS, ...ALT_DEFAULTS, ...LINE_PROFILE, ...tochkaAlternative(), clientRisk: 'reliable', insuranceConfirmed: false, targetProfit: 2000, profileVersion: 4 });
+const initialState = () => ({ ...DEFAULTS, ...ALT_DEFAULTS, ...LINE_PROFILE, ...tochkaAlternative(), ...FLOW_DEFAULTS, calculationMode: 'single', clientRisk: 'reliable', insuranceConfirmed: false, targetProfit: 2000, profileVersion: 4 });
 let state = initialState();
 let meeting = null;
 let lastQuotePrice = null;
@@ -108,6 +112,7 @@ recommendationPanel.setAttribute('aria-labelledby', 'recommendation-title');
 recommendationPanel.innerHTML = '<p class="eyebrow">КАКУЮ СХЕМУ ВЫБРАТЬ</p><h2 id="recommendation-title">Лучший вариант при ваших условиях</h2><div id="recommendation"></div>';
 $('result').insertBefore(recommendationPanel, $('result').querySelector('.minima-panel'));
 mountMeetingLayout(document);
+mountFlowControls(document, { numberField, fieldGrid, selectField });
 $('quote-explanation').after(creditSummary);
 $('apply-quote').after(copyMeeting);
 
@@ -170,6 +175,7 @@ function readForm() {
   for (const element of form.elements) {
     const key = element.name;
     if (!key || !Object.hasOwn(state, key)) continue;
+    if (element.type === 'radio' && !element.checked) continue;
     if (element.type === 'checkbox') next[key] = element.checked;
     else if (numbers.has(key)) {
       const cleaned = element.value.replace(/[\s\u00a0\u202f]/g, '').replace(',', '.');
@@ -224,22 +230,34 @@ function renderError(error) {
   $('copy-result').disabled = true;
   $('print-result').disabled = true;
   $('download-prices').disabled = true;
+  $('flow-report-heading').textContent = 'Исправьте ввод, чтобы построить план.';
+  $('flow-report-body').replaceChildren();
+  $('print-flow').disabled = true;
 }
 function render() {
   $('manual-copy')?.remove();
   try {
     const next = readForm();
+    syncFlowMode(document, next);
     if (next.fundingKind !== 'none' && next.fundingKind !== next.primaryFundingKind) throw new RangeError('Тип продукта не совпадает с его тарифом. Переключите продукт после исправления остальных полей.');
     if (next.fundingKind !== 'none' && !next.fundingTermsKnown) throw new RangeError('Условия выбранного банковского продукта ещё не введены. Заполните его тариф и отметьте «Условия выбранного продукта введены». Лимит другого продукта не переносится.');
-    result = calculate(next);
-    if (next.altKnown) calculate({ ...next, ...Object.fromEntries(BILLING_PAIRS.map(([primary, alternative]) => [primary, next[alternative]])), fundingKind: next.primaryFundingKind === 'line' ? 'credit' : 'line', fundingRate: next.altRate, fundingLimit: next.altLimit, fundingFeePercent: next.altFeePercent, fundingFeeFixed: next.altFeeFixed, fundingFeeVatPercent: next.altFeeVatPercent, fundingMonthly: next.altMonthly, fundingMonthlyVolume: next.altMonthlyVolume });
+    result = next.calculationMode === 'flow' ? calculatePortfolio(next) : calculate(next);
+    if (next.altKnown && next.calculationMode !== 'flow') calculate({ ...next, ...Object.fromEntries(BILLING_PAIRS.map(([primary, alternative]) => [primary, next[alternative]])), fundingKind: next.primaryFundingKind === 'line' ? 'credit' : 'line', fundingRate: next.altRate, fundingLimit: next.altLimit, fundingFeePercent: next.altFeePercent, fundingFeeFixed: next.altFeeFixed, fundingFeeVatPercent: next.altFeeVatPercent, fundingMonthly: next.altMonthly, fundingMonthlyVolume: next.altMonthlyVolume });
     state = next;
+    syncFlowMode(document, state);
     $('form-error').hidden = true;
     $('copy-result').disabled = false;
     $('print-result').disabled = false;
     $('download-prices').disabled = false;
     $('copy-meeting').disabled = false;
+    $('print-flow').disabled = false;
     syncCards();
+    if (state.calculationMode === 'flow') {
+      renderRisk();
+      renderMeeting();
+      persist();
+      return;
+    }
     renderResults();
     renderRecommendations();
     renderTimeline();
@@ -283,6 +301,18 @@ function shortAvailability(offer) {
   return offer.executionReadyQuote ? 'Источники отмечены' : 'Нужно уточнить условия';
 }
 function renderMeeting() {
+  if (state.calculationMode === 'flow') {
+    meeting = buildFlowOffers(state, state.targetProfit, { risk: state.clientRisk, insuranceConfirmed: state.insuranceConfirmed, alternativeFunding: alternativeFunding() });
+    renderFlowMeeting(document, state, meeting, { money, whole, esc, humanScheme });
+    syncBillingFields();
+    const q = meeting.selected.quote;
+    if (meetingAction) {
+      const difference = q && lastQuotePrice !== null ? q.price - lastQuotePrice : null;
+      $('meeting-status').textContent = difference === 0 ? 'Средняя цена не изменилась. Проверьте, как изменились расходы и нехватка оборотных денег.' : difference !== null ? `Цена для цели ${difference > 0 ? 'выросла' : 'снизилась'} на ${money(Math.abs(difference))}.` : 'План пересчитан.';
+    } else $('meeting-status').textContent = '';
+    lastQuotePrice = q?.price ?? null; meetingAction = '';
+    return;
+  }
   meeting = buildOffers(state, state.targetProfit, { risk: state.clientRisk, insuranceConfirmed: state.insuranceConfirmed, alternativeFunding: alternativeFunding() });
   $('meeting-error').hidden = true;
   const selected = meeting.selected;
@@ -357,9 +387,15 @@ function syncBillingFields() {
     $(alternative ? 'altRate' : 'fundingRate').closest('.field').hidden = value('fundingInterestMode') !== 'annual_daily';
     const upfrontName = alternative ? 'altMonthlyUpfront' : 'fundingMonthlyUpfront';
     $(upfrontName).closest('.check-row').hidden = value('fundingInterestMode') !== 'monthly_full';
+    $(alternative ? 'altTermMonths' : 'fundingTermMonths').closest('.field').hidden = state.calculationMode === 'flow';
   }
-  const q = meeting?.selected.quoteResult || result;
-  $('fundingFeePercent-help').textContent = `Дополнительный разовый сбор, не комиссия 2,49% в месяц. Например, 1% от закупки ${money(state.purchase)} = ${money(state.purchase / 100)}. Если банк берёт процент от выдачи, введите соответствующую сумму в рублях ниже.`;
+  const q = state.calculationMode === 'flow' ? calculate({ ...state, fundingKind: 'none' }) : meeting?.selected.quoteResult || result;
+  const flow = state.calculationMode === 'flow';
+  for (const name of ['fundingFeePercent', 'altFeePercent']) {
+    $(name).labels[0].textContent = flow ? 'Разовый сбор, % суммы кредита / лимита' : 'Дополнительная комиссия один раз, % закупки';
+    $(`${name}-help`).textContent = flow ? `Один раз на весь поток: 1% от плановой суммы ${money(state.flowLoanAmount)} = ${money(state.flowLoanAmount / 100)}. Это дополнительный сбор сверх месячной комиссии. Если база в договоре другая, пересчитайте и введите сбор в рублях.`
+      : `Дополнительный разовый сбор, не комиссия 2,49% в месяц. Например, 1% от закупки ${money(state.purchase)} = ${money(state.purchase / 100)}. Если банк берёт процент от выдачи, введите соответствующую сумму в рублях.`;
+  }
   $('fundingFeeFixed-help').textContent = 'Отдельный сбор за выдачу в рублях. Например, банк просит 600 ₽ один раз — введите 600. Если такого сбора нет в договоре, оставьте 0.';
   $('fundingMonthly-help').textContent = 'Только дополнительная фиксированная плата за продукт или пакет сверх процентной комиссии. Не вводите сюда весь платёж по графику: в нём есть возврат долга.';
   const advance = q.unpaidInvoice * state.factorAdvancePercent / 100;
@@ -488,6 +524,7 @@ function renderPrices() {
   $('prices-table').innerHTML = priceRows.map(row => `<tr><th scope="row">${money(row.purchase)}</th>${row.minima.map(min => `<td>${min ? money(min.price) : 'Не достигнуть'}<small>${min ? `+ ${money(min.markup)}` : 'Добавка до 1 млн ₽'}</small></td>`).join('')}</tr>`).join('');
 }
 function textSummary() {
+  if (state.calculationMode === 'flow') return flowTextSummary(state, meeting, { money, humanScheme });
   const r = result;
   const advice = currentAdvice();
   const winner = advice.best || advice.candidate;
@@ -559,7 +596,7 @@ document.addEventListener('click', event => {
 $('price-details').addEventListener('toggle', () => { if ($('price-details').open) renderPrices(); });
 $('reset').addEventListener('click', () => {
   clearTimeout(timer);
-  state = initialState();
+  state = { ...initialState(), calculationMode: state.calculationMode };
   lastQuotePrice = null;
   fillForm(); render(); $('action-status').textContent = 'Исходный пример восстановлен.';
 });
@@ -592,6 +629,23 @@ $('copy-result').addEventListener('click', async () => {
   }
 });
 $('print-result').addEventListener('click', () => { render(); if (result) { $('calculation-details').open = true; window.print(); } });
+let flowPrintDisclosureState = null;
+function prepareFlowPrint() {
+  if (state.calculationMode !== 'flow' || !result) return;
+  if (!flowPrintDisclosureState) flowPrintDisclosureState = [...$('flow-report').querySelectorAll('details')].map(element => [element, element.open]);
+  for (const [element] of flowPrintDisclosureState) element.open = true;
+}
+function restoreFlowPrint() {
+  for (const [element, open] of flowPrintDisclosureState || []) element.open = open;
+  flowPrintDisclosureState = null;
+}
+window.addEventListener('beforeprint', prepareFlowPrint);
+window.addEventListener('afterprint', restoreFlowPrint);
+$('print-flow').addEventListener('click', () => {
+  render(); if (!result || state.calculationMode !== 'flow') return;
+  prepareFlowPrint();
+  try { window.print(); } finally { restoreFlowPrint(); }
+});
 $('download-prices').addEventListener('click', () => {
   if (!result) return;
   renderPrices();
@@ -602,5 +656,7 @@ $('download-prices').addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-loadSaved(); fillForm(); render();
+loadSaved();
+if (new URLSearchParams(location.search).get('mode') === 'flow') state.calculationMode = 'flow';
+fillForm(); render();
 if (!storageAvailable) document.querySelector('.site-footer p').append(' Автосохранение недоступно в этом браузере.');
