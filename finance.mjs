@@ -1,14 +1,24 @@
 /**
  * One-wagon economics and a netted, day-by-day operating cash schedule.
  * All input prices include VAT; bank fees are entered excluding their own VAT.
- * Loan interest is simple, uses a 365-day year and is paid after the last event.
+ * Default loan interest is simple, annual and paid after the last event.
+ * Optional monthly modes and principal instalments use a separate reserve.
  */
+import { priceCredit } from './credit-pricing.mjs';
+
 export const DEFAULTS = Object.freeze({
   purchase: 100000, markup: 5000, vatPercent: 22, volume: 1200,
   monthlyOverhead: 515000, ownCash: 0,
   clientDays: 30, delayAnchor: 'payment', acceptanceDay: 20, lateDays: 0,
   supplierDay: 0, advancePercent: 0,
   fundingKind: 'credit', fundingRate: 23.5, fundingLimit: 0,
+  fundingInterestMode: 'annual_daily', fundingMonthlyRate: 2,
+  fundingMonthlyBase: 'balance', fundingMinimumMonths: 1,
+  fundingCloseMode: 'on_client', fundingTermMonths: 3,
+  fundingMonthlyUpfront: false, fundingPrincipalMode: 'fixed', fundingLoanMin: 0, fundingLoanMax: 0,
+  fundingEarlyConfirmed: true,
+  fundingScheduleConfirmed: true,
+  fundingPrincipalMonthly: 0, fundingRepaymentReserve: 0,
   fundingFeePercent: 0, fundingFeeFixed: 0, fundingFeeVatPercent: 0,
   fundingMonthly: 0, fundingMonthlyVolume: 0,
   accountEnabled: false, accountMonthly: 0, accountVatPercent: 0,
@@ -37,6 +47,10 @@ const NAMES = {
   acceptanceDay: 'День приёмки', lateDays: 'Просрочка клиента',
   supplierDay: 'День оплаты поставщику', advancePercent: 'Аванс клиента',
   fundingRate: 'Годовая ставка кредита', fundingLimit: 'Подтверждённый лимит',
+  fundingMonthlyRate: 'Месячная ставка кредита', fundingMinimumMonths: 'Минимальное число оплачиваемых месяцев',
+  fundingTermMonths: 'Срок кредитного графика',
+  fundingLoanMin: 'Минимальная сумма выдачи кредита', fundingLoanMax: 'Максимальная сумма выдачи кредита',
+  fundingPrincipalMonthly: 'Ежемесячное погашение тела кредита', fundingRepaymentReserve: 'Отдельный резерв для платежей банку',
   fundingFeePercent: 'Комиссия кредита', fundingFeeFixed: 'Разовая плата кредита',
   fundingFeeVatPercent: 'НДС комиссии кредита', fundingMonthly: 'Абонентская плата кредита',
   fundingMonthlyVolume: 'Число заявок по кредиту', accountMonthly: 'Плата за счёт',
@@ -98,11 +112,29 @@ function normalize(input) {
   for (const key of ANNUAL_KEYS) {
     if (value[key] > 1000) throw new RangeError(`${NAMES[key]}: ставка должна быть от 0 до 1000% годовых.`);
   }
+  if (value.fundingMonthlyRate > 1000) {
+    throw new RangeError('Месячная ставка кредита: ставка должна быть от 0 до 1000% в месяц.');
+  }
+  for (const key of ['fundingMinimumMonths', 'fundingTermMonths']) {
+    if (!Number.isInteger(value[key]) || value[key] < 1 || value[key] > 120) {
+      throw new RangeError(`${NAMES[key]}: введите целое число от 1 до 120.`);
+    }
+  }
+  if (value.fundingLoanMax > 0 && value.fundingLoanMin > value.fundingLoanMax) {
+    throw new RangeError('Минимальная сумма выдачи кредита не может превышать максимальную.');
+  }
+  if (value.fundingKind !== 'none' && value.fundingMonthlyUpfront && value.fundingInterestMode === 'monthly_daily') {
+    throw new RangeError('Комиссия в начале месяца требует режима полного месячного периода.');
+  }
   for (const key of BOOLEAN_KEYS) {
     if (typeof value[key] !== 'boolean') throw new RangeError(`${key}: укажите включено или выключено.`);
   }
   for (const [key, allowed] of [
-    ['fundingKind', ['credit', 'overdraft', 'none']],
+    ['fundingKind', ['line', 'credit', 'overdraft', 'none']],
+    ['fundingInterestMode', ['annual_daily', 'monthly_daily', 'monthly_full']],
+    ['fundingMonthlyBase', ['balance', 'initial']],
+    ['fundingCloseMode', ['on_client', 'scheduled']],
+    ['fundingPrincipalMode', ['fixed', 'equal']],
     ['delayAnchor', ['payment', 'acceptance']],
     ['factorRateBase', ['invoice', 'advance']],
   ]) {
@@ -209,10 +241,12 @@ export function calculate(input = {}) {
     priorLoanNeed = loanNeed;
     return { day: event.day, label: event.labels.join('; '), cash: event.cash, cumulative, loanNeed };
   });
-  const creditInterest = p.fundingKind === 'none' ? 0 : financingRublesDays * p.fundingRate / 100 / 365;
+  const creditPricing = priceCredit(p, timeline, paymentDay);
+  const creditInterest = creditPricing.creditInterest;
   const initialFundingNeed = timeline[0].loanNeed;
   const confirmedLoanLimit = p.fundingKind === 'none' ? 0 : p.fundingLimit;
-  const uncoveredGap = cleanZero(Math.max(peakFundingNeed - confirmedLoanLimit, 0));
+  const peakBankLoan = p.fundingKind === 'none' ? 0 : Math.max(peakFundingNeed, creditPricing.amount);
+  const uncoveredGap = cleanZero(Math.max((p.fundingKind === 'none' ? peakFundingNeed : peakBankLoan) - confirmedLoanLimit, 0));
   const closingCashAfterInterest = cleanZero(cumulative - creditInterest);
   const closingDebt = cleanZero(Math.max(-closingCashAfterInterest, 0));
   const overheadPerWagon = p.monthlyOverhead / p.volume;
@@ -232,6 +266,31 @@ export function calculate(input = {}) {
     + guaranteeFeeGross - guaranteeFeeNet + lcFeeGross - lcFeeNet
     + fundingSetupGross - fundingSetupNet + subscriptionGrossPerWagon - subscriptionNetPerWagon;
   const warnings = [];
+  const scheduleUnconfirmed = p.fundingKind !== 'none' && p.fundingCloseMode === 'scheduled'
+    && !p.fundingScheduleConfirmed && creditPricing.amount > 0;
+  if (scheduleUnconfirmed) warnings.push({
+    code: 'SCHEDULE_UNCONFIRMED',
+    message: 'График возврата тела кредита не подтверждён. Платежи и потребность в резерве рассчитаны по плановому графику.',
+  });
+  const earlyRepaymentUnconfirmed = p.fundingKind !== 'none' && p.fundingCloseMode === 'on_client'
+    && !p.fundingEarlyConfirmed && creditPricing.amount > 0;
+  if (earlyRepaymentUnconfirmed) warnings.push({
+    code: 'EARLY_REPAYMENT_UNCONFIRMED',
+    message: 'Досрочное погашение и отмена будущих комиссий не подтверждены.',
+  });
+  if (creditPricing.tradeFundingGap > 0) warnings.push({
+    code: 'SCHEDULE_TRADE_GAP',
+    message: `После платежей банку для торговых платежей не хватает ${creditPricing.tradeFundingGap.toFixed(2)} ₽. Нужен дополнительный резерв.`,
+  });
+  const loanMaximumExceeded = p.fundingKind !== 'none' && p.fundingLoanMax > 0 && peakBankLoan > p.fundingLoanMax;
+  if (loanMaximumExceeded) warnings.push({
+    code: 'LOAN_MAX_EXCEEDED',
+    message: `Нужная сумма кредита ${peakBankLoan.toFixed(2)} ₽ превышает максимальную сумму продукта ${p.fundingLoanMax.toFixed(2)} ₽.`,
+  });
+  if (creditPricing.repaymentReserveGap > 0) warnings.push({
+    code: 'REPAYMENT_RESERVE_GAP',
+    message: `До оплаты клиента банк требует ${creditPricing.repaymentsBeforeClient.toFixed(2)} ₽, отдельного резерва не хватает ${creditPricing.repaymentReserveGap.toFixed(2)} ₽. Эти платежи не являются все расходом: погашение тела кредита не уменьшает прибыль.`,
+  });
   if (uncoveredGap > 0) warnings.push({
     code: 'FUNDING_GAP',
     message: `Непокрытая потребность в деньгах: ${uncoveredGap.toFixed(2)} ₽. Подтверждённый кредитный лимит не включает факторинг.`,
@@ -262,13 +321,15 @@ export function calculate(input = {}) {
     monthlyProjectionNote: hasMixedMonthlyVolumes
       ? 'Разные объёмы по инструментам: месячный итог требует структуры потока по схемам.'
       : 'Проекция для однородного потока: все вагоны месяца проходят по выбранной схеме. Расходы месяца и налоговый резерв не включены в календарь денег сделки.',
-    peakFundingNeed, initialFundingNeed, uncoveredGap, financingRublesDays, creditInterest,
+    peakFundingNeed, initialFundingNeed, peakBankLoan, uncoveredGap, financingRublesDays, creditInterest, creditPricing,
     dueDay, paymentDay, factorDay, factorDays, factorUsed, factorAdvance,
     factorFeeNet, factorFeeGross, clientAdvance, unpaidInvoice,
     guaranteeFeeNet, guaranteeFeeGross, lcFeeNet, lcFeeGross, lcApplied, lcUnusedCoverage,
     fundingSetupNet, fundingSetupGross,
     timeline, closingCashAfterInterest, closingDebt, warnings,
-    executionReady: uncoveredGap === 0 && (!factorUsed || p.factorConfirmed) && closingDebt === 0,
+    executionReady: uncoveredGap === 0 && (!factorUsed || p.factorConfirmed) && closingDebt === 0
+      && creditPricing.repaymentReserveGap === 0 && creditPricing.tradeFundingGap === 0
+      && !loanMaximumExceeded && !earlyRepaymentUnconfirmed && !scheduleUnconfirmed,
   };
   for (const [key, value] of Object.entries(result)) {
     if (typeof value === 'number' && !Number.isFinite(value)) {
@@ -280,7 +341,7 @@ export function calculate(input = {}) {
 
 /** Economic price only: confirmation and limit warnings are retained by calculate. */
 export function minimumMarkup(input = {}, target = 0) {
-  normalize(input);
+  const p = normalize(input);
   if (typeof target !== 'number' || !Number.isFinite(target)) {
     throw new RangeError('Целевая прибыль должна быть конечным числом.');
   }
@@ -288,35 +349,75 @@ export function minimumMarkup(input = {}, target = 0) {
   const first = calculate({ ...input, markup: 0 });
   if (first.profit >= target) return { markup: 0, price: first.invoiceGross, profit: first.profit };
   const last = calculate({ ...input, markup: cap });
-  // Profit is piecewise linear. Changes in its slope occur when a day balance
-  // crosses zero. Inspect these intervals even when very high fees make it fall.
+  // Trade balances, instalments and full-period maximum debt introduce slope
+  // changes. Keep their candidate crossings, including non-monotone tariffs.
   const points = [0, cap];
+  const addCrossing = (firstValue, lastValue, threshold = 0) => {
+    const difference = lastValue - firstValue;
+    if (difference === 0) return;
+    const crossing = (threshold - firstValue) * cap / difference;
+    if (crossing > 0 && crossing < cap) points.push(crossing);
+  };
   first.timeline.forEach((event, index) => {
-    const difference = last.timeline[index].cumulative - event.cumulative;
-    if (difference !== 0) {
-      const crossing = -event.cumulative * cap / difference;
-      if (crossing > 0 && crossing < cap) points.push(crossing);
-    }
+    addCrossing(event.cumulative, last.timeline[index].cumulative);
   });
+  if (p.fundingKind !== 'none' && (p.fundingPrincipalMonthly > 0 || p.fundingInterestMode === 'monthly_full'
+    || p.fundingCloseMode === 'scheduled')) {
+    const instalments = p.fundingCloseMode === 'scheduled' ? p.fundingTermMonths
+      : Math.ceil(first.timeline.at(-1).day / 30);
+    first.timeline.forEach((event, index) => {
+      if (p.fundingLoanMin > 0) {
+        const retainedFraction = p.fundingMonthlyUpfront && p.fundingInterestMode === 'monthly_full'
+          ? 1 - p.fundingMonthlyRate / 100 : 1;
+        addCrossing(event.cumulative, last.timeline[index].cumulative, -p.fundingLoanMin * retainedFraction);
+      }
+      if (p.fundingPrincipalMonthly > 0) {
+        for (let number = 1; number <= instalments; number += 1) {
+          addCrossing(event.cumulative, last.timeline[index].cumulative, -number * p.fundingPrincipalMonthly);
+        }
+      }
+      for (let other = index + 1; other < first.timeline.length; other += 1) {
+        addCrossing(event.cumulative - first.timeline[other].cumulative,
+          last.timeline[index].cumulative - last.timeline[other].cumulative);
+        if (p.fundingPrincipalMonthly > 0) {
+          for (let number = 1; number <= instalments; number += 1) {
+            for (const sign of [-1, 1]) {
+              addCrossing(event.cumulative - first.timeline[other].cumulative,
+                last.timeline[index].cumulative - last.timeline[other].cumulative,
+                sign * number * p.fundingPrincipalMonthly);
+            }
+          }
+        }
+      }
+    });
+  }
   points.sort((a, b) => a - b);
   let leftMarkup = 0;
-  let leftProfit = first.profit;
-  for (const rightMarkup of points.slice(1)) {
-    const rightProfit = calculate({ ...input, markup: rightMarkup }).profit;
-    if (rightProfit >= target && rightProfit > leftProfit) {
-      const crossing = leftMarkup + (target - leftProfit) * (rightMarkup - leftMarkup) / (rightProfit - leftProfit);
-      let markup = Math.max(0, Math.ceil(crossing / 10) * 10);
-      let result = calculate({ ...input, markup });
-      if (result.profit < target && markup + 10 <= cap) {
-        markup += 10;
-        result = calculate({ ...input, markup });
+  for (const rightMarkup of [...new Set(points)].slice(1)) {
+    let low = Math.ceil(leftMarkup / 10);
+    let high = Math.floor(rightMarkup / 10);
+    if (high < low) {
+      leftMarkup = rightMarkup;
+      continue;
+    }
+    let result = calculate({ ...input, markup: high * 10 });
+    if (result.profit < target && high > low) {
+      high -= 1;
+      result = calculate({ ...input, markup: high * 10 });
+    }
+    if (result.profit >= target) {
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (calculate({ ...input, markup: middle * 10 }).profit >= target) high = middle;
+        else low = middle + 1;
       }
+      const markup = high * 10;
+      result = calculate({ ...input, markup });
       if (markup <= cap && result.profit >= target) {
         return { markup, price: result.invoiceGross, profit: result.profit };
       }
     }
     leftMarkup = rightMarkup;
-    leftProfit = rightProfit;
   }
   return null;
 }

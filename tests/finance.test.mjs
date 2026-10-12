@@ -20,6 +20,263 @@ test('defaults are complete, immutable, and contain a real zero funding limit', 
   assert.equal(result.uncoveredGap, 100000);
 });
 
+test('credit pricing modes validate rates, minimum months and separately owned repayment money', () => {
+  assert.equal(DEFAULTS.fundingInterestMode, 'annual_daily');
+  assert.equal(DEFAULTS.fundingMonthlyRate, 2);
+  assert.equal(DEFAULTS.fundingMonthlyBase, 'balance');
+  assert.equal(DEFAULTS.fundingMinimumMonths, 1);
+  for (const input of [{ fundingInterestMode: 'monthly' }, { fundingMonthlyBase: 'limit' },
+    { fundingCloseMode: 'early' }, { fundingTermMonths: 0 }, { fundingTermMonths: 121 }, { fundingTermMonths: 1.5 },
+    { fundingMonthlyRate: -1 }, { fundingMonthlyRate: 1001 }, { fundingMonthlyRate: Infinity },
+    { fundingMinimumMonths: 0 }, { fundingMinimumMonths: 121 }, { fundingMinimumMonths: 1.5 },
+    { fundingPrincipalMonthly: -1 }, { fundingRepaymentReserve: NaN }]) {
+    assert.throws(() => calculate(input), RangeError);
+  }
+});
+
+test('a monthly principal instalment needs its own reserve without double counting principal as expense', () => {
+  const input = { ...base, fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000 };
+  const conditional = calculate(input);
+  assert.equal(conditional.creditInterest, 3600);
+  assert.equal(conditional.creditPricing.principalRepaid, 20000);
+  assert.equal(conditional.creditPricing.repaymentReserveGap, 22000);
+  assert.equal(conditional.uncoveredGap, 0);
+  assert.equal(conditional.peakFundingNeed, 100000);
+  assert.equal(conditional.executionReady, false);
+  assert.match(conditional.warnings.find(warning => warning.code === 'REPAYMENT_RESERVE_GAP').message,
+    /погашение тела кредита не уменьшает прибыль/);
+  close(conditional.profit, 5000 / 1.22 - 3600 - 515000 / 1200);
+  close(conditional.closingCashAfterInterest, 5000 - 3600);
+  const funded = calculate({ ...input, fundingRepaymentReserve: 22000 });
+  assert.equal(funded.executionReady, true);
+  assert.equal(funded.creditPricing.repaymentReserveGap, 0);
+  assert.equal(funded.profit, conditional.profit);
+  assert.equal(funded.closingCashAfterInterest, conditional.closingCashAfterInterest);
+});
+
+test('monthly interest is due before customer payment even without principal instalments', () => {
+  for (const mode of ['monthly_daily', 'monthly_full']) {
+    const result = calculate({ ...base, fundingInterestMode: mode, fundingPrincipalMonthly: 0 });
+    assert.equal(result.creditPricing.repaymentsBeforeClient, 2000);
+    assert.equal(result.creditPricing.repaymentReserveGap, 2000);
+    assert.equal(result.executionReady, false);
+    assert.equal(calculate({ ...base, fundingInterestMode: mode, fundingRepaymentReserve: 2000 }).executionReady, true);
+  }
+  assert.equal(calculate(base).creditPricing.repaymentReserveGap, 0);
+  assert.equal(calculate(base).executionReady, true);
+});
+
+test('factor reduces the next credit balance and caps principal while subscriptions stay outside trade cash', () => {
+  const input = { ...base, factorEnabled: true, factorConfirmed: true, factorUpfront: false,
+    fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000, fundingRepaymentReserve: 2250 };
+  const result = calculate(input);
+  assert.equal(result.creditInterest, 2000);
+  assert.equal(result.creditPricing.principalRepaid, 250);
+  assert.deepEqual(result.creditPricing.repaymentSchedule,
+    [{ day: 30, principal: 250, interest: 2000, total: 2250 }]);
+  assert.equal(result.executionReady, true);
+  const fees = calculate({ ...input, fundingMonthly: 12000, factorMonthly: 6000 });
+  assert.deepEqual(fees.creditPricing, result.creditPricing);
+  assert.deepEqual(fees.timeline, result.timeline);
+  close(result.profit - fees.profit, 15);
+});
+
+test('monthly target pricing uses interest as an expense and reserves only for readiness', () => {
+  const input = { ...base, fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000 };
+  const quote = minimumMarkup(input, 2000);
+  assert.ok(quote);
+  const result = calculate({ ...input, markup: quote.markup });
+  assert.ok(result.profit >= 2000);
+  assert.ok(calculate({ ...input, markup: quote.markup - 10 }).profit < 2000);
+  assert.equal(result.creditPricing.repaymentReserveGap, 22000);
+  assert.equal(result.executionReady, false);
+  const funded = calculate({ ...input, markup: quote.markup, fundingRepaymentReserve: 22000 });
+  assert.equal(funded.profit, result.profit);
+  assert.equal(funded.executionReady, true);
+});
+
+test('scheduled credit treats factoring as a payment source while keeping all contracted loan interest', () => {
+  const input = { ...base, markup: 10000, fundingCloseMode: 'scheduled',
+    fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000, fundingTermMonths: 3 };
+  const plain = calculate(input);
+  assert.equal(plain.creditInterest, 4800);
+  assert.equal(plain.creditPricing.repaymentReserveGap, 22000);
+  assert.equal(plain.executionReady, false);
+  const factor = calculate({ ...input, factorEnabled: true, factorConfirmed: true, factorUpfront: false });
+  assert.equal(factor.creditInterest, plain.creditInterest);
+  assert.equal(factor.creditPricing.repaymentReserveGap, 0);
+  assert.equal(factor.executionReady, true);
+  close(plain.profit - factor.profit, factor.factorFeeNet);
+  assert.equal(factor.creditPricing.repaymentSchedule[0].principal, 20000);
+  assert.equal(factor.creditPricing.repaymentSchedule.at(-1).principal, 60000);
+});
+
+test('early customer receipt does not cancel scheduled interest and fixed fees remain independent', () => {
+  const input = { ...base, markup: 10000, clientDays: 7, fundingCloseMode: 'scheduled',
+    fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000, fundingTermMonths: 3 };
+  const result = calculate(input);
+  assert.equal(result.creditInterest, 4800);
+  assert.equal(result.creditPricing.repaymentReserveGap, 0);
+  assert.equal(result.executionReady, true);
+  const fees = calculate({ ...input, fundingMonthly: 12000 });
+  assert.deepEqual(fees.creditPricing, result.creditPricing);
+  close(result.profit - fees.profit, 10);
+  assert.equal(calculate({ ...input, fundingKind: 'none' }).creditInterest, 0);
+});
+
+test('minimum markup remains the first ten-ruble price across amortisation thresholds', () => {
+  const input = { fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000,
+    clientDays: 75, advancePercent: 30, ownCash: 15000 };
+  const quote = minimumMarkup(input, 2000);
+  assert.equal(quote.markup, 5410);
+  assert.ok(quote.profit >= 2000);
+  assert.ok(calculate({ ...input, markup: 5400 }).profit < 2000);
+});
+
+test('minimum target prices remain minimal with both loan closing modes, factoring and insurance', () => {
+  for (const fundingCloseMode of ['on_client', 'scheduled']) {
+    for (const fundingInterestMode of ['monthly_full', 'monthly_daily']) {
+      for (const insuranceEnabled of [false, true]) {
+        for (const fundingPrincipalMonthly of [500, 20000, 80000]) {
+          for (const factorEnabled of [false, true]) {
+            const input = { fundingCloseMode, fundingInterestMode, insuranceEnabled,
+              fundingPrincipalMonthly, factorEnabled, clientDays: 75, advancePercent: 30,
+              ownCash: 15000, fundingTermMonths: 4 };
+            const quote = minimumMarkup(input, 2000);
+            assert.ok(quote, JSON.stringify(input));
+            assert.ok(quote.profit >= 2000, JSON.stringify(input));
+            assert.ok(calculate({ ...input, markup: quote.markup - 10 }).profit < 2000,
+              JSON.stringify({ input, quote }));
+          }
+        }
+      }
+    }
+  }
+});
+
+test('flat upfront monthly credit checks the gross loan against limit and product maximum', () => {
+  const input = { ...base, markup: 20000, fundingInterestMode: 'monthly_full', fundingMonthlyRate: 2.49,
+    fundingMonthlyBase: 'initial', fundingMonthlyUpfront: true, fundingCloseMode: 'scheduled',
+    fundingPrincipalMode: 'equal', fundingTermMonths: 3, fundingLoanMin: 50000, fundingLoanMax: 27510000,
+    fundingLimit: 100000, fundingRepaymentReserve: 50000 };
+  const result = calculate(input);
+  close(result.peakBankLoan, 100000 / 0.9751);
+  assert.equal(result.peakFundingNeed, 100000);
+  close(result.uncoveredGap, result.peakBankLoan - 100000);
+  assert.equal(result.executionReady, false);
+  const funded = calculate({ ...input, fundingLimit: 200000 });
+  assert.equal(funded.executionReady, true);
+  const overMaximum = calculate({ ...input, fundingLimit: 200000, fundingLoanMax: 102000 });
+  assert.equal(overMaximum.executionReady, false);
+  assert.ok(overMaximum.warnings.some(warning => warning.code === 'LOAN_MAX_EXCEEDED'));
+});
+
+test('first upfront commission is an expense exactly once and principal is never a second expense', () => {
+  const input = { ...base, markup: 20000, fundingInterestMode: 'monthly_full', fundingMonthlyRate: 2.49,
+    fundingMonthlyBase: 'initial', fundingMonthlyUpfront: true, fundingCloseMode: 'scheduled',
+    fundingPrincipalMode: 'equal', fundingTermMonths: 3, fundingRepaymentReserve: 50000 };
+  const result = calculate(input);
+  close(result.creditInterest, result.creditPricing.firstFee * 3);
+  close(result.profit, 20000 / 1.22 - result.creditPricing.firstFee * 3 - 515000 / 1200);
+  assert.equal(result.breakdown.fundingSetup, 0);
+  assert.equal(result.creditPricing.repaymentSchedule.at(-1).interest, 0);
+  const fee = calculate({ ...input, fundingFeeFixed: 1000 });
+  close(fee.creditPricing.amount, 101000 / 0.9751);
+  assert.equal(fee.breakdown.fundingSetup, 1000);
+});
+
+test('unconfirmed early repayment cannot make a conditional low price execution ready', () => {
+  const input = { ...base, clientDays: 7, fundingEarlyConfirmed: false };
+  const result = calculate(input);
+  assert.equal(result.executionReady, false);
+  assert.ok(result.warnings.some(warning => warning.code === 'EARLY_REPAYMENT_UNCONFIRMED'));
+  assert.equal(calculate({ ...input, fundingEarlyConfirmed: true }).executionReady, true);
+  assert.equal(calculate({ ...input, fundingCloseMode: 'scheduled', markup: 10000 }).executionReady, true);
+});
+
+test('intermediate trade cash shortage after bank payments blocks execution despite funded due dates', () => {
+  const input = { fundingCloseMode: 'scheduled', fundingInterestMode: 'monthly_full',
+    fundingPrincipalMonthly: 20000, fundingTermMonths: 3, fundingFeeFixed: 20000,
+    supplierDay: 50, clientDays: 80, factorEnabled: true, factorConfirmed: true,
+    acceptanceDay: 55, factorAdvancePercent: 95, factorRate: 0, fundingLimit: 200000, markup: 30000 };
+  const result = calculate(input);
+  assert.equal(result.creditPricing.repaymentReserveGap, 0);
+  assert.equal(result.creditPricing.tradeFundingGap, 22400);
+  assert.equal(result.executionReady, false);
+  assert.ok(result.warnings.some(warning => warning.code === 'SCHEDULE_TRADE_GAP'));
+  assert.equal(calculate({ ...input, fundingRepaymentReserve: 22400 }).executionReady, true);
+});
+
+test('minimum target price inspects the profitable grid immediately before a first-draw clock change', () => {
+  const input = { fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 5000,
+    fundingMinimumMonths: 3, clientDays: 75, supplierDay: 40, advancePercent: 20,
+    insuranceEnabled: true, insurancePercent: 2, fundingFeeFixed: 50000, monthlyOverhead: 0 };
+  const quote = minimumMarkup(input, 85000);
+  assert.equal(quote.markup, 176210);
+  assert.ok(quote.profit >= 85000);
+  assert.ok(calculate({ ...input, markup: 176200 }).profit < 85000);
+});
+
+test('minimum target price includes offsets between debt events and prior principal caps', () => {
+  const input = { fundingInterestMode: 'monthly_full', fundingPrincipalMonthly: 20000,
+    fundingMinimumMonths: 1, clientDays: 75, supplierDay: 50, acceptanceDay: 40,
+    fundingFeeFixed: 2000, monthlyOverhead: 0, factorEnabled: true,
+    factorAdvancePercent: 60, factorUpfront: false, factorRate: 0, factorFeePercent: 100,
+    fundingMonthlyRate: 20 };
+  const quote = minimumMarkup(input, -112500);
+  assert.equal(quote.markup, 31850);
+  assert.ok(quote.profit >= -112500);
+  assert.ok(calculate({ ...input, markup: 31840 }).profit < -112500);
+});
+
+test('unconfirmed principal schedule blocks execution while keeping contracted commissions unchanged', () => {
+  const input = { ...base, markup: 20000, fundingInterestMode: 'monthly_full', fundingMonthlyRate: 2.49,
+    fundingMonthlyBase: 'initial', fundingMonthlyUpfront: true, fundingCloseMode: 'scheduled',
+    fundingPrincipalMode: 'equal', fundingTermMonths: 3, fundingRepaymentReserve: 50000 };
+  const confirmed = calculate(input);
+  const conditional = calculate({ ...input, fundingScheduleConfirmed: false });
+  assert.equal(confirmed.executionReady, true);
+  assert.equal(conditional.executionReady, false);
+  assert.equal(conditional.creditInterest, confirmed.creditInterest);
+  assert.ok(conditional.warnings.some(warning => warning.code === 'SCHEDULE_UNCONFIRMED'));
+});
+
+test('minimum target price inspects the new slope at the minimum issuance amount', () => {
+  const input = { fundingCloseMode: 'scheduled', fundingInterestMode: 'monthly_full',
+    fundingMonthlyBase: 'initial', fundingMonthlyRate: 1000, fundingTermMonths: 1,
+    fundingLoanMin: 50000, ownCash: 100000, insuranceEnabled: true,
+    insurancePercent: 10, monthlyOverhead: 0 };
+  const quote = minimumMarkup(input, -230000);
+  assert.equal(quote.markup, 389070);
+  assert.ok(quote.profit >= -230000);
+  assert.ok(calculate({ ...input, markup: 389060 }).profit < -230000);
+});
+
+test('no borrowing ignores monthly upfront mechanics and confirmed banking schedule constraints', () => {
+  const result = calculate({ fundingKind: 'none', ownCash: 200000,
+    fundingInterestMode: 'monthly_daily', fundingMonthlyUpfront: true,
+    fundingCloseMode: 'scheduled', fundingScheduleConfirmed: false, fundingEarlyConfirmed: false,
+    fundingLoanMin: 50000, fundingLoanMax: 100000 });
+  assert.equal(result.creditInterest, 0);
+  assert.equal(result.creditPricing.amount, 0);
+  assert.equal(result.creditPricing.firstFee, 0);
+  assert.equal(result.executionReady, true);
+});
+
+test('annual revolving line keeps daily credit economics and separate target prices for factoring', () => {
+  const input = { ...DEFAULTS, fundingKind: 'line', clientDays: 30, fundingRate: 23.5 };
+  const line = calculate(input);
+  const credit = calculate({ ...input, fundingKind: 'credit' });
+  assert.equal(line.creditInterest, credit.creditInterest);
+  assert.equal(line.profit, credit.profit);
+  const plain = minimumMarkup(input, 2000);
+  const factor = minimumMarkup({ ...input, factorEnabled: true }, 2000);
+  assert.equal(plain.markup, 5330);
+  assert.equal(factor.markup, 5140);
+  assert.ok(calculate({ ...input, markup: 5320 }).profit < 2000);
+  assert.ok(calculate({ ...input, factorEnabled: true, markup: 5130 }).profit < 2000);
+});
+
 test('manual 45-day credit example separates gross markup, VAT, interest, and overhead', () => {
   const result = calculate(base);
   close(result.creditInterest, 100000 * 0.235 * 45 / 365);
