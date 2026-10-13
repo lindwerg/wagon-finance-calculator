@@ -1,12 +1,15 @@
 /** Rendering only: portfolio economics and liquidity stay in portfolio.mjs. */
-export function mountFlowControls(doc, { numberField, fieldGrid, selectField }) {
+export function mountFlowControls(doc, { numberField, selectField }) {
   const mode = doc.createElement('fieldset');
   mode.className = 'mode-selector';
   mode.innerHTML = '<legend>Что рассчитываем</legend><div class="mode-options"><label><input type="radio" name="calculationMode" value="single"><span>Одна заявка</span></label><label><input type="radio" name="calculationMode" value="flow"><span>Постоянный объём</span></label></div><p id="mode-explanation"></p>';
   const quick = doc.getElementById('deal');
   quick.querySelector('.section-heading').after(mode);
+  const volume = doc.createElement('div'); volume.id = 'flow-volume-control'; volume.className = 'flow-top-volume'; volume.hidden = true;
+  volume.innerHTML = numberField('flowMonthlyVolume', 'Сколько вагонов в месяц', 'шт.', 'Объём, который финансируем этими деньгами. Общий объём компании задаётся отдельно.');
+  mode.after(volume);
   const controls = doc.createElement('div'); controls.id = 'flow-controls'; controls.className = 'flow-controls'; controls.hidden = true;
-  controls.innerHTML = fieldGrid(numberField('flowMonthlyVolume', 'Вагонов в месяц на этих деньгах', 'шт.', 'Только этот поток. Общий объём компании задаётся отдельно.'), numberField('flowMonths', 'Срок плана и кредита', 'мес.', 'От 3 до 12. Для Точки задаёт срок кредитного сценария.'))
+  controls.innerHTML = numberField('flowMonths', 'Срок плана и кредита', 'мес.', 'От 3 до 12. Для Точки задаёт срок кредитного сценария.')
     + numberField('flowLoanAmount', 'Сумма кредита / плановый лимит ВКЛ', '₽', 'Одна сумма на весь поток. Повторное использование денег не означает новую выдачу каждый вагон.')
     + selectField('flowDispatch', 'Когда закупаем вагоны', [['uniform', 'Постепенно в течение месяца'], ['monthly_batch', 'Весь месячный объём сразу']])
     + '<p class="flow-controls-note">План новых заявок с одинаковыми ценами. Старые неоплаченные счета и прежние кредиты сюда автоматически не добавляются. Свои свободные деньги, отдельный резерв для банка и одобренные лимиты — в <a href="#advanced-settings" data-open-settings>условиях</a>.</p>';
@@ -19,6 +22,7 @@ export function mountFlowControls(doc, { numberField, fieldGrid, selectField }) 
 export function syncFlowMode(doc, state) {
   const flow = state.calculationMode === 'flow';
   doc.body.classList.toggle('flow-mode', flow);
+  doc.getElementById('flow-volume-control').hidden = !flow;
   doc.getElementById('flow-controls').hidden = !flow;
   doc.getElementById('flow-report').hidden = !flow;
   doc.getElementById('calculation-details').hidden = flow;
